@@ -2,6 +2,7 @@ import json
 import aiohttp
 import asyncio
 import logging
+import re
 
 from functools import lru_cache
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 # type: 1-songs, 10-albums, 100-artists, 1000-playlists
 COMMON_SEARCH_URL_WANGYI = 'https://music.163.com/api/cloudsearch/pc?s={}&type={}&offset={}&limit={}'
 ALBUM_SEARCH_URL_WANGYI = 'https://music.163.com/api/album/{}?ext=true'
-LYRIC_URL_WANGYI = 'https://music.163.com/api/song/lyric?id={}&lv=1&tv=1'
+LYRIC_URL_WANGYI = 'https://music.163.com/api/song/lyric?id={}&lv=-1&tv=-1'
 ARTIST_SEARCH_URL = 'http://music.163.com/api/v1/artist/{}'
 ALBUMS_SEARCH_URL = "http://music.163.com/api/artist/albums/{}?offset=0&total=true&limit=300"
 ALBUM_INFO_URL = "http://music.163.com/api/album/{}?ext=true"
@@ -126,12 +127,81 @@ async def get_cover_url(session: aiohttp.ClientSession, album_id: int):
     return None
 
 
+def _extract_lyric_field(json_data: dict, field: str):
+    payload = json_data.get(field) or {}
+    lyric = payload.get('lyric')
+    if isinstance(lyric, str) and lyric.strip():
+        return lyric
+    return None
+
+
+def _merge_lrc_with_romaji(lrc_text: str, romaji_text: str) -> str:
+    if not lrc_text or not romaji_text:
+        return lrc_text or romaji_text or None
+
+    timestamp_pattern = re.compile(r'^(\[\d+:\d+(?:\.\d+)?\])')
+
+    def parse_lrc(text: str):
+        parsed = {}
+        for line in (text or '').strip().split('\n'):
+            match = timestamp_pattern.match(line)
+            if not match:
+                continue
+            ts = match.group(1)
+            content = line[len(ts):].strip()
+            if content:
+                parsed[ts] = content
+        return parsed
+
+    lrc_dict = parse_lrc(lrc_text)
+    romaji_dict = parse_lrc(romaji_text)
+
+    if not lrc_dict:
+        return lrc_text
+    if not romaji_dict:
+        return lrc_text
+
+    merged_lines = []
+    for line in lrc_text.strip().split('\n'):
+        if not timestamp_pattern.match(line):
+            merged_lines.append(line)
+
+    all_timestamps = sorted(set(lrc_dict.keys()) | set(romaji_dict.keys()))
+    for ts in all_timestamps:
+        base = lrc_dict.get(ts)
+        romaji = romaji_dict.get(ts)
+        if base:
+            merged_lines.append(f"{ts}{base}")
+        if romaji and romaji != base:
+            merged_lines.append(f"{ts}{romaji}")
+
+    return '\n'.join(merged_lines)
+
+
 async def get_lyrics(session: aiohttp.ClientSession, track_id: int):
     url = LYRIC_URL_WANGYI.format(track_id)
     json_data_r = await session.get(url, headers=headers)
     json_data = json.loads(await json_data_r.text())
-    if json_data.get('lrc', False) and json_data.get('lrc').get('lyric', False):
-        return json_data['lrc']['lyric']
+
+    lrc = _extract_lyric_field(json_data, 'lrc')
+    romalrc = _extract_lyric_field(json_data, 'romalrc')
+    yrc = _extract_lyric_field(json_data, 'yrc')
+    klyric = _extract_lyric_field(json_data, 'klyric')
+    tlyric = _extract_lyric_field(json_data, 'tlyric')
+
+    if lrc and romalrc:
+        return _merge_lrc_with_romaji(lrc, romalrc)
+    if lrc:
+        return lrc
+    if romalrc:
+        return romalrc
+    if yrc:
+        return yrc
+    if klyric:
+        return klyric
+    # Do NOT fall back to tlyric (translated lyrics) — it contains
+    # Chinese translations, not the original language. Return None so
+    # other search sources can provide the original lyrics instead.
     return None
 
 

@@ -176,3 +176,9 @@ appdata/
 ann.md
 test/
 /logs/
+
+test_music
+LrcDownload
+QWEN.md
+.qwen/*
+.qwen
